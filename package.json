@@ -33,7 +33,7 @@
     "marked-footnote": "^1.4.0"
   },
   "devDependencies": {
-    "@pipobscure/bundle": "^0.0.10",
+    "@pipobscure/bundle": "^0.0.11",
     "@types/node": "^26.6.3",
     "typescript": "^7.0.2"
   }
