@@ -13,7 +13,7 @@
     "start": "node --no-warnings src/index.ts",
     "dev": "node --no-warnings src/index.ts",
     "typecheck": "tsc && tsc -p web",
-    "test": "npm run typecheck && node --no-warnings --test test/*.test.ts",
+    "test": "npm run typecheck && node --no-warnings --test --test-force-exit test/*.test.ts",
     "manifest": "node --no-warnings tools/manifest.ts",
     "package": "npm run manifest && bundle create --base . --files build/bled.manifest --output build/bled.run",
     "smoke": "node --no-warnings tools/smoke.ts build/bled.run",

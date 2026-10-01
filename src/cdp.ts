@@ -23,10 +23,12 @@ export class CdpConnection extends EventEmitter {
   #nextId = 1;
   #pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   #buffer = "";
+  #incoming: NodeJS.ReadableStream;
   #outgoing: NodeJS.WritableStream;
 
   constructor({ incoming, outgoing }: Pipes) {
     super();
+    this.#incoming = incoming;
     this.#outgoing = outgoing;
     incoming.setEncoding("utf8");
     incoming.on("data", (chunk: string) => this.#onData(chunk));
@@ -42,6 +44,11 @@ export class CdpConnection extends EventEmitter {
       this.#pending.set(id, { resolve, reject });
       this.#outgoing.write(message + "\0");
     });
+  }
+
+  /** Closes both pipes. On Windows they would otherwise keep node running after Chrome is gone. */
+  dispose(): void {
+    for (const stream of [this.#incoming, this.#outgoing] as { destroy?: () => void }[]) stream.destroy?.();
   }
 
   #onData(chunk: string): void {

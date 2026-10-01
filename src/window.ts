@@ -99,6 +99,10 @@ export class AppWindow extends EventEmitter {
 
   close(): void {
     this.#chrome?.kill();
+    // Release everything that ties node to the Chrome process, so closing the
+    // window never leaves this process waiting on it (seen on Windows).
+    this.#cdp?.dispose();
+    this.#chrome?.process.unref();
   }
 
   async #onPageMessage(payload: string): Promise<void> {
