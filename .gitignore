@@ -1,0 +1,7 @@
+node_modules/
+build/
+*.nzip
+*.log
+.env
+.kilo/
+package-lock.json

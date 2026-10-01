@@ -1,0 +1,273 @@
+# Releases bled whenever main carries a version that has no GitHub release yet.
+#
+# Bumping `version` in package.json and pushing it is the whole release
+# procedure. This runs once CI has passed for a push to main, on the commit CI
+# tested; every other run stops after one `gh release view`.
+#
+# A release is built the way @pipobscure/bundle says a bundle should be:
+#
+#   1. test       nothing gets packaged that does not pass
+#   2. pack       the file list, the unsigned archive, and a smoke test of it
+#   3. baseline   the latest release, verified as signed by this workflow
+#      audit      review the new archive *against* it; a JSON verdict pinned to bytes
+#      gate       refuse to sign without a clean verdict over exactly those bytes
+#   4. sign       sigstore, with this workflow's own OIDC identity; then verify
+#   5. release    a GitHub release carrying the signed bled.nzip
+#
+# There are no secrets. Sigstore certifies the signature with the job's OIDC
+# token, and the audit reaches Anthropic through workload identity federation
+# with that same token. The audit needs these repository variables (none secret):
+#
+#   ANTHROPIC_ORGANIZATION_ID     the organization's UUID
+#   ANTHROPIC_FEDERATION_RULE_ID  the rule (fdrl_...) trusting issuer
+#                                 https://token.actions.githubusercontent.com with
+#                                 subject repo:<owner>/<repo>:ref:refs/heads/main
+#   ANTHROPIC_SERVICE_ACCOUNT_ID  the service account (svac_...) the rule acts as
+#   ANTHROPIC_WORKSPACE_ID        only if the rule covers more than one workspace
+#
+# (Anthropic Console → Settings → Workload identity → Connect workload → GitHub
+# Actions sets up all three.) Without them the audit fails, and so does the
+# release: nothing is signed that was not reviewed.
+#
+# Every action is pinned to a full commit SHA. A tag is a mutable pointer, and
+# whoever can move one could change what runs in a job that can sign releases.
+
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # The identity a release carries, and the one users verify against.
+  RELEASE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/main
+  RELEASE_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  check:
+    name: Is this version released?
+    # Only after a green CI run for a push to main; a manual dispatch releases
+    # the tip of main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The commit CI tested, not whatever main points at by now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Compare package.json with the releases
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "::notice::v$version is already released"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::v$version is not released yet; releasing it"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build, audit and sign
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Fulcio takes the signing identity from this token, and the audit's access
+      # to Anthropic is exchanged for it. Nothing else holds a credential.
+      id-token: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.10.0'
+
+      - name: Install dependencies
+        run: npm install
+
+      # ---- 1. nothing gets packaged that does not pass --------------------------
+      - name: Test
+        run: npm test
+
+      # ---- 2. the unsigned archive ----------------------------------------------
+      - name: Pack
+        run: npm run package
+
+      - name: Smoke test the archive
+        run: npm run smoke
+
+      # ---- 3. baseline, audit, gate ---------------------------------------------
+      # The latest release becomes the comparison basis, verified first: a
+      # baseline that cannot be placed would make the diff lie by omission. The
+      # first release has none, and the audit then reviews every member.
+      - name: Baseline — the release that is already out there
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          npx bundle trust
+          if gh release download --pattern bled.nzip --dir build/baseline 2> /dev/null; then
+            npx bundle verify --identity "$RELEASE_IDENTITY" --issuer "$RELEASE_ISSUER" build/baseline/bled.nzip
+            mv build/baseline/bled.nzip build/baseline.run
+          else
+            echo "::notice::no earlier release; the audit reviews every member"
+          fi
+
+      # Installed by the tool itself, so CI uses the same skill a person would.
+      - name: Install the audit skill
+        run: npx bundle skill
+
+      - name: Audit — review the difference before signing
+        id: audit
+        uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1
+        env:
+          # Where the skill writes the verdict the gate below checks.
+          BUNDLE_AUDIT_VERDICT: build/bled.audit.json
+        with:
+          anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          # The job's own read-only token: the audit writes nothing to GitHub.
+          github_token: ${{ github.token }}
+          prompt: >-
+            /audit-bundle build/bled.run against build/baseline.run
+
+            This is a pre-signing audit. build/bled.run is the unsigned archive this
+            workflow just built for ${{ github.repository }} (bled, a local markdown
+            editor: a node server that launches Chrome and serves the page from the
+            archive) and is about to sign; build/baseline.run is the latest release,
+            already verified as signed by this workflow. If the baseline file is
+            absent, this is the first release: review every member instead and say so.
+
+            Use diff mode when there is a baseline: review what changed, and call out
+            every member added or removed even when each individual diff looks
+            harmless. Write the machine-readable verdict to build/bled.audit.json,
+            including baselineSha256 when you reviewed a diff. The build gates on that
+            file and will not sign without a pass pinned to this archive's sha256.
+          claude_args: |
+            --max-turns 120
+            --allowedTools "Bash,Read,Glob,Grep,Write"
+
+      # Kept whether the gate passes or not, so a refused release leaves its
+      # reasoning behind rather than only a red X.
+      - name: Keep the verdict with the run
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audit-verdict
+          path: build/bled.audit.json
+          if-no-files-found: warn
+
+      - name: Keep the audit transcript with the run
+        if: always() && steps.audit.outputs.execution_file != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audit-transcript
+          path: ${{ steps.audit.outputs.execution_file }}
+          if-no-files-found: warn
+
+      # ---- 4. sign ---------------------------------------------------------------
+      # No --key: sigstore takes the identity from the job's OIDC token, so the
+      # release is signed as this workflow rather than as a person.
+      - name: Gate on the audit, then sign — sigstore, as this workflow
+        run: |
+          baseline=()
+          if [ -f build/baseline.run ]; then baseline=(--baseline build/baseline.run); fi
+          npx bundle audit --check "${baseline[@]}" --verdict build/bled.audit.json build/bled.run
+          npx bundle sign --launcher --output bled.nzip build/bled.run
+
+      - name: Verify what was just signed
+        run: npx bundle verify --identity "$RELEASE_IDENTITY" --issuer "$RELEASE_ISSUER" bled.nzip
+
+      - name: Keep the artifacts with the run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bled
+          path: |
+            bled.nzip
+            build/bled.manifest
+            build/bled.audit.json
+
+  # Its own job, because it is the only one that can write to the repository:
+  # the job that ran the audit (an agent with a shell) and held the signing token
+  # never gets contents: write, and this one never gets id-token.
+  release:
+    name: GitHub release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch what the build job signed
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bled
+
+      - name: Create the release, marked latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.check.outputs.version }}
+          TARGET: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          chmod +x bled.nzip
+          cat > notes.md <<EOF
+          **\`bled.nzip\`** is the whole app in one signed file. It needs Node 26.10 or later and Chrome or Chromium:
+
+          \`\`\`sh
+          chmod +x bled.nzip
+          ./bled.nzip path/to/blog-post-folder
+          \`\`\`
+
+          Or install it, verified, with [\`bundle\`](https://github.com/pipobscure/bundles), which also keeps it updated:
+
+          \`\`\`sh
+          bundle install --identity '$RELEASE_IDENTITY' \\
+            https://github.com/$GH_REPO/releases/download/v$VERSION/bled.nzip
+          \`\`\`
+
+          It was signed through sigstore by this repository's release workflow. To check it:
+
+          \`\`\`sh
+          bundle verify --identity '$RELEASE_IDENTITY' --issuer '$RELEASE_ISSUER' bled.nzip
+          \`\`\`
+
+          \`bled.audit.json\` is the audit verdict it was signed under, pinned to the unsigned archive's sha256.
+          EOF
+          cp build/bled.audit.json bled.audit.json
+          gh release create "v$VERSION" bled.nzip bled.audit.json \
+            --target "$TARGET" --title "v$VERSION" --notes-file notes.md --latest

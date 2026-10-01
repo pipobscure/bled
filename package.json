@@ -1,0 +1,39 @@
+{
+  "name": "bled",
+  "version": "0.1.0",
+  "description": "bled: a markdown editor for blog posts, with research cards and an AI assistant",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "engines": {
+    "node": ">=26.10.0"
+  },
+  "scripts": {
+    "start": "node --no-warnings src/index.ts",
+    "dev": "node --no-warnings src/index.ts",
+    "typecheck": "tsc && tsc -p web",
+    "test": "npm run typecheck && node --no-warnings --test test/*.test.ts",
+    "manifest": "node --no-warnings tools/manifest.ts",
+    "package": "npm run manifest && bundle create --base . --files build/bled.manifest --output build/bled.run",
+    "smoke": "node --no-warnings tools/smoke.ts build/bled.run",
+    "sign": "bundle sign --launcher --output bled.nzip build/bled.run",
+    "verify": "bundle verify bled.nzip"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@lezer/highlight": "^1.2.5",
+    "chrome-launcher": "^1.2.2",
+    "marked": "^18.0.14",
+    "marked-footnote": "^1.4.0"
+  },
+  "devDependencies": {
+    "@pipobscure/bundle": "^0.0.10",
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2"
+  }
+}
