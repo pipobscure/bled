@@ -2,6 +2,7 @@
   "name": "bled",
   "version": "0.1.0",
   "description": "bled: a markdown editor for blog posts, with research cards and an AI assistant",
+  "license": "EUPL-1.2",
   "private": true,
   "type": "module",
   "main": "src/index.ts",

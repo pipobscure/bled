@@ -21,7 +21,7 @@ const { dependencies } = JSON.parse(readFileSync(join(ROOT, "package.json"), "ut
 
 const files = moduleFiles({
   base: ROOT,
-  files: ["package.json"],
+  files: ["package.json", "LICENSE", "README.md"],
   dirs: ["src", "web", "public"],
   dependencies: Object.keys(dependencies),
   // What runs, not what is read about it: no type declarations, source maps or
