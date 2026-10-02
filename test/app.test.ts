@@ -124,6 +124,20 @@ describe("app", { skip: !hasChrome && "no Chrome installation found" }, () => {
     assert.ok(!(await q(`document.documentElement.outerHTML.includes('test-key')`)));
   });
 
+  test("clicking into the assistant input keeps focus there", async () => {
+    await q(`document.querySelector('.cm-content').focus()`);
+    const { x, y } = await q<{ x: number; y: number }>(
+      `(() => { const r = document.querySelector('#ai-input').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      await app.window.command("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+    }
+    await app.window.command("Input.insertText", { text: "typed" });
+    assert.equal(await q(`document.activeElement.id`), "ai-input");
+    assert.equal(await q(`document.querySelector('#ai-input').value`), "typed");
+    await setValue("#ai-input", "");
+  });
+
   test("chats with the article and research as context", async () => {
     await setValue("#ai-input", "Why cards?");
     await click("#ai-send");

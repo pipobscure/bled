@@ -233,7 +233,7 @@ function flash(message: string): void {
 
 function setLayout(layout: Layout): void {
   workspace.dataset.layout = layout;
-  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-layout]")) {
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-layout]")) {
     button.setAttribute("aria-pressed", String(button.dataset.layout === layout));
   }
   refreshDerived(editor.state.doc.toString());
@@ -250,7 +250,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-command
     editor.focus();
   });
 }
-for (const button of document.querySelectorAll<HTMLButtonElement>("[data-layout]")) {
+for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-layout]")) {
   button.addEventListener("click", () => setLayout(button.dataset.layout as Layout));
 }
 function togglePanel(): void {
