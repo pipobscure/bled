@@ -60,7 +60,8 @@ describe("app", { skip: !hasChrome && "no Chrome installation found" }, () => {
   test("starts with the folder picker, then opens a project", async () => {
     assert.ok(await q(`!document.querySelector('#welcome').hidden`));
     await openFolder(project);
-    assert.ok(await until(`document.querySelectorAll('.card').length === 9 && document.querySelector('#doc-select').value === 'post.md'`));
+    // The document list is filled in before the article opens, so wait for its text too.
+    assert.ok(await until(`document.querySelectorAll('.card').length === 9 && document.querySelector('#doc-select').value === 'post.md' && document.querySelector('.cm-content').innerText.includes('Every post I write')`));
     assert.equal(app.settings.get().recent[0], project);
   });
 
