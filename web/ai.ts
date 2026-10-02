@@ -164,10 +164,75 @@ export function parseSuggestions(reply: string): RawSuggestion[] {
   const start = reply.indexOf("{");
   const end = reply.lastIndexOf("}");
   if (start === -1 || end <= start) throw new Error("The model didn't return JSON.");
-  const parsed = JSON.parse(reply.slice(start, end + 1)) as { suggestions?: unknown };
-  if (!Array.isArray(parsed.suggestions)) throw new Error("The model's JSON has no suggestions list.");
-  return parsed.suggestions
-    .filter((s): s is Record<string, unknown> => typeof s === "object" && s !== null && typeof s.original === "string")
+  const json = reply.slice(start, end + 1);
+  return toSuggestions(parseLeniently(json));
+}
+
+/**
+ * JSON.parse, then the same after repairing what models commonly get wrong
+ * (unescaped quotes and raw newlines inside strings, trailing commas). If the
+ * whole reply still doesn't parse, keeps the suggestion objects that do.
+ */
+function parseLeniently(json: string): unknown[] {
+  const list = (parsed: { suggestions?: unknown }) => {
+    if (!Array.isArray(parsed.suggestions)) throw new Error("The model's JSON has no suggestions list.");
+    return parsed.suggestions;
+  };
+  try {
+    return list(JSON.parse(json));
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  const repaired = repairJson(json);
+  try {
+    return list(JSON.parse(repaired));
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    const salvaged = [];
+    for (const match of repaired.matchAll(/\{[^{}]*\}/g)) {
+      try {
+        salvaged.push(JSON.parse(match[0]));
+      } catch {
+        // Skip the broken one.
+      }
+    }
+    if (!salvaged.length) throw new Error(`The model returned malformed JSON (${error.message}).`);
+    return salvaged;
+  }
+}
+
+/** Escapes quotes that can't end a string, and raw control characters; drops trailing commas. */
+export function repairJson(json: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i]!;
+    if (!inString) {
+      if (char === '"') inString = true;
+      if (char === "," && /^\s*[}\]]/.test(json.slice(i + 1))) continue;
+      out += char;
+    } else if (char === "\\") {
+      out += char + (json[++i] ?? "");
+    } else if (char === '"') {
+      // A real closing quote is followed by structure: `:`, `}`, `]`, or `,` and the next key or item.
+      const rest = json.slice(i + 1);
+      if (/^\s*([:}\]]|$)|^\s*,\s*("[\w-]+"\s*:|[{\]"]|null\b)/.test(rest)) {
+        inString = false;
+        out += char;
+      } else {
+        out += '\\"';
+      }
+    } else if (char === "\n") out += "\\n";
+    else if (char === "\r") out += "\\r";
+    else if (char === "\t") out += "\\t";
+    else out += char;
+  }
+  return out;
+}
+
+function toSuggestions(suggestions: unknown[]): RawSuggestion[] {
+  return suggestions
+    .filter((s): s is Record<string, unknown> => typeof s === "object" && s !== null && typeof (s as Record<string, unknown>).original === "string")
     .map((s) => ({
       original: s.original as string,
       replacement: typeof s.replacement === "string" ? s.replacement : null,

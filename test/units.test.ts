@@ -83,6 +83,16 @@ test("model replies are parsed leniently", () => {
     { original: "claim", replacement: null, reason: "", kind: "" },
   ]);
   assert.throws(() => parseSuggestions("I can't help with that."), /didn't return JSON/);
+
+  // Unescaped quotes and raw newlines copied from the article, and a trailing comma.
+  const sloppy = '{"suggestions": [{"original": "He called it "the digital euro", then left.", "replacement": null, "reason": "Quote "x" isn\'t sourced\nat all", "kind": "unsupported"},]}';
+  assert.deepEqual(parseSuggestions(sloppy), [
+    { original: 'He called it "the digital euro", then left.', replacement: null, reason: 'Quote "x" isn\'t sourced\nat all', kind: "unsupported" },
+  ]);
+  // One hopeless object doesn't cost the others.
+  const partly = '{"suggestions": [{"original": "a", "replacement": "b"}, {"original": "c" "replacement": ]}, {"original": "d", "replacement": "e"}]}';
+  assert.deepEqual(parseSuggestions(partly).map((s) => s.original), ["a", "d"]);
+  assert.throws(() => parseSuggestions('{"suggestions": [{"original": "a" "b": }'), /malformed JSON/);
 });
 
 test("long documents split into contiguous parts at paragraph breaks", () => {
