@@ -195,18 +195,24 @@ export function insertCitation(view: EditorView, source: Source): void {
 
 /** `change`, followed by appending the source's footnote definition if the result lacks one. */
 function withDefinition(doc: Text, change: ChangeSpec, source: Source): ChangeSet {
+  return withFootnoteDefinition(doc, change, footnoteDefinition(source));
+}
+
+/** `change`, followed by appending `definition` (a `[^id]: …` line) if the result has none for that id. */
+export function withFootnoteDefinition(doc: Text, change: ChangeSpec, definition: string): ChangeSet {
   const first = ChangeSet.of(change, doc.length);
   const next = first.apply(doc);
   const text = next.toString();
-  if (hasDefinition(text, source)) return first;
+  const id = /^\[\^([^\]]+)\]:/.exec(definition)![1]!;
+  if (hasDefinition(text, { id })) return first;
   // Footnote definitions collect at the end of the article: one per line,
   // with a blank line between them and the body.
   const content = text.replace(/\n+$/, "");
   const lastLine = content.slice(content.lastIndexOf("\n") + 1);
   const newlines = content === "" ? 0 : FOOTNOTE_DEFINITION.test(lastLine) ? 1 : 2;
   const separator = "\n".repeat(Math.max(0, newlines - (text.length - content.length)));
-  const definition = { from: next.length, insert: separator + footnoteDefinition(source) + "\n" };
-  return first.compose(ChangeSet.of(definition, next.length));
+  const appended = { from: next.length, insert: separator + definition + "\n" };
+  return first.compose(ChangeSet.of(appended, next.length));
 }
 
 const FOOTNOTE_DEFINITION = /^\[\^[^\]]+\]:/;

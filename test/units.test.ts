@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { loadProject } from "../src/project.ts";
 import type { Source } from "../src/types.ts";
 import { parseSuggestions, splitIntoParts } from "../web/ai.ts";
-import { footnoteDefinition, hasDefinition, quoteBlock, Usage } from "../web/citations.ts";
+import { citationProblems, citesUnpublished, footnoteDefinition, linkDefinition, withFrontmatterUrl, hasDefinition, quoteBlock, Usage } from "../web/citations.ts";
 import { diffWords, locate } from "../web/suggestions.ts";
 
 const EXAMPLE = fileURLToPath(new URL("../example/", import.meta.url));
@@ -97,4 +97,48 @@ test("long documents split into contiguous parts at paragraph breaks", () => {
     position = part.to;
   }
   assert.equal(position, text.length);
+});
+
+test("citations must lead to published sources, never research notes", async () => {
+  const project = await loadProject(EXAMPLE.replace(/[\\/]$/, ""));
+  const ok = "Cards.[^card-method]\n\n[^card-method]: [The Card Method](https://example.com/card-method), Example Author, 2023.\n";
+  assert.deepEqual(citationProblems(project, ok), []);
+
+  const article = [
+    "One idea per card.[^card-method] Fragments hide the argument.[^against-fragments] Links help.[^linked-notes]",
+    "",
+    "[^card-method]: [The Card Method](sources/card-method.md), Example Author, 2023.",
+    "[^against-fragments]: Against Fragments, Placeholder Critic, 2024.",
+    "[^elsewhere]: [Some post](https://example.org/post).",
+  ].join("\n");
+  const problems = citationProblems(project, article);
+  assert.deepEqual(
+    problems.map((p) => [p.kind, p.original.slice(0, 20), p.replacement]),
+    [
+      ["internal citation", "[^card-method]: [The", "[^card-method]: [The Card Method](https://example.com/card-method), Example Author, 2023."],
+      ["unpublished source", "[^against-fragments]", null],
+      ["missing definition", "[^linked-notes]", "[^linked-notes]"],
+    ],
+  );
+  assert.match(problems[1]!.reason, /sources\/against-fragments\.md/);
+  assert.equal(problems[2]!.definition, "[^linked-notes]: [Notes That Link](https://example.com/linked-notes), Sample Writer.");
+  // A research note without a URL is fixed with the URL the author enters, which is recorded in the note.
+  assert.deepEqual(problems[1]!.withUrl!("https://example.org/fragments"), {
+    replacement: "[^against-fragments]: [Against Fragments](https://example.org/fragments), Placeholder Critic, 2024.",
+    note: "sources/against-fragments.md",
+  });
+
+  const unknown = citationProblems(project, "Claim.[^a] Other.[^b]\n\n[^a]: [My notes](notes/a.md), 2024.\n");
+  assert.equal(unknown[0]!.withUrl!("https://x.test/a").replacement, "[^a]: [My notes](https://x.test/a), 2024.");
+  assert.deepEqual(unknown[1]!.withUrl!("https://x.test/b"), { replacement: "[^b]", definition: "[^b]: <https://x.test/b>." });
+  assert.equal(linkDefinition("[^c]: Some Book, 2001.", "https://x.test/c"), "[^c]: [Some Book, 2001](https://x.test/c).");
+
+  assert.equal(withFrontmatterUrl("---\ntitle: T\n---\n\nBody\n", "https://x.test"), "---\ntitle: T\nurl: https://x.test\n---\n\nBody\n");
+  assert.equal(withFrontmatterUrl("---\nurl: old.md\n---\nBody\n", "https://x.test"), "---\nurl: https://x.test\n---\nBody\n");
+  assert.equal(withFrontmatterUrl("Body\n", "https://x.test"), "---\nurl: https://x.test\n---\n\nBody\n");
+
+  const suggest = (replacement: string) => ({ original: "Cards hide things.", replacement, reason: "", kind: "missing citation" });
+  assert.ok(citesUnpublished(project, suggest("Cards hide things.[^against-fragments]")));
+  assert.ok(citesUnpublished(project, suggest("Cards hide things.[^made-up]")));
+  assert.ok(!citesUnpublished(project, suggest("Cards hide things.[^card-method]")));
 });

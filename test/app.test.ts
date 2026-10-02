@@ -170,7 +170,33 @@ describe("app", { skip: !hasChrome && "no Chrome installation found" }, () => {
   test("checks the article against its sources", async () => {
     await click("#ai-check");
     assert.ok(await until(`[...document.querySelectorAll('.suggestion-kind')].some(k => k.textContent === 'unsupported')`));
-    assert.match(ai.requests.at(-1).messages[0].content, /fact-checker[\s\S]*\[\^linked-notes\]/);
+    const system = ai.requests.at(-1).messages[0].content;
+    assert.match(system, /fact-checker[\s\S]*\[\^linked-notes\]/);
+    assert.match(system, /\[\^against-fragments\] Against Fragments.*\nNot citable/);
+    const kinds = await q<string[]>(`[...document.querySelectorAll('.suggestion-kind')].map(k => k.textContent)`);
+    assert.ok(!kinds.includes("missing citation"), "suggestions citing research notes are dropped");
+  });
+
+  test("fixes footnotes that don't lead to published sources", async () => {
+    assert.ok(await until(`document.querySelector('#save-status').dataset.state === 'saved'`));
+    await writeFile(join(project, "post.md"), "# Cards\n\nLinks help.[^linked-notes] Fragments hide things.[^against-fragments]\n");
+    assert.ok(await until(`document.querySelector('.cm-content').innerText.includes('Fragments hide things.')`));
+    await click("#ai-clear");
+    await click("#ai-check");
+    const item = (kind: string) => `[...document.querySelectorAll('.suggestion')].find(s => s.querySelector('.suggestion-kind').textContent === '${kind}')`;
+    assert.ok(await until(`${item("unpublished source")} && ${item("missing definition")}`));
+    await q(`${item("missing definition")}.querySelector('[data-action=apply]').click()`);
+    await q(`${item("unpublished source")}.querySelector('.suggestion-url').value = 'https://example.org/fragments'`);
+    await q(`${item("unpublished source")}.querySelector('[data-action=apply]').click()`);
+    assert.ok(await until(`${item("unpublished source")}.dataset.status === 'applied'`));
+    await sleep(1200); // autosave
+    assert.equal(
+      await article(),
+      "# Cards\n\nLinks help.[^linked-notes] Fragments hide things.[^against-fragments]\n\n" +
+        "[^linked-notes]: [Notes That Link](https://example.com/linked-notes), Sample Writer.\n" +
+        "[^against-fragments]: [Against Fragments](https://example.org/fragments), Placeholder Critic, 2024.\n",
+    );
+    assert.match(await readFile(join(project, "sources", "against-fragments.md"), "utf8"), /^---\n[\s\S]*\nurl: https:\/\/example\.org\/fragments\n---\n/);
   });
 
   test("explains when a reasoning model never answers", async () => {
@@ -236,7 +262,10 @@ async function startMockAi() {
           { original: "text that is not in the article", replacement: "x", reason: "n/a", kind: "spelling" },
         ] }) + "\n```"
       : system.includes("fact-checker")
-        ? JSON.stringify({ suggestions: [{ original: "Why I draft on index cards", replacement: null, reason: "Opinion, no source.", kind: "unsupported" }] })
+        ? JSON.stringify({ suggestions: [
+            { original: "Why I draft on index cards", replacement: null, reason: "Opinion, no source.", kind: "unsupported" },
+            { original: "Every post I write starts as a deck of cards.", replacement: "Every post I write starts as a deck of cards.[^against-fragments]", reason: "Cite the note.", kind: "missing citation" },
+          ] })
         : last.includes("Rewrite this passage")
           ? "Each of my posts starts life as a deck of index cards."
           : "Sure. **Cards** keep each idea separate.[^card-method]";

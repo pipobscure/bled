@@ -1,4 +1,5 @@
 import type { Project, Source } from "../src/types.ts";
+import { isPublished } from "./citations.ts";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -28,7 +29,7 @@ const SYSTEM = `You are a writing assistant and editor built into a markdown edi
 
 Rules:
 - Match the author's voice and the article's language.
-- Write markdown. Citations are footnotes: put [^id] right after the claim it supports, using only the source ids listed under "Research sources". Never invent sources, ids, quotes, figures or dates. If a claim needs support that the research doesn't contain, say so plainly.
+- Write markdown. Citations are footnotes: put [^id] right after the claim it supports, using only the source ids listed under "Research sources" that have a published URL. Sources marked "not citable" are the author's internal notes: use them for background, but never cite them. Never invent sources, ids, quotes, figures or dates. If a claim needs support that the research doesn't contain, say so plainly.
 - Quotes from sources must be verbatim.
 - Be concise. No preamble.`;
 
@@ -43,6 +44,7 @@ export function researchContext(project: Project, article: string): string {
 function describeSource(source: Source, withCards: boolean): string {
   const meta = [source.author, source.date, source.url].filter(Boolean).join(" · ");
   const lines = [`## [^${source.id}] ${source.title}${meta ? ` (${meta})` : ""}`];
+  if (!isPublished(source)) lines.push("Not citable: an internal research note with no published URL.");
   if (source.note) lines.push(`Why it matters: ${source.note}`);
   if (withCards) {
     for (const card of source.cards) {
@@ -127,7 +129,7 @@ export function sourceCheckMessages(project: Project, path: string, text: string
 - "wrong citation": a footnote marker pointing at a source that doesn't support the claim
 - "missing citation": a claim a source supports, but without its footnote marker
 
-Footnote markers look like [^id]; ids belong to the sources below. For "missing citation" and "wrong citation", the replacement is the original text with the right marker. For "misquote", it is the original with the source's exact wording. For "unsupported" and "contradicted", give a corrected wording only if a source supports one; otherwise null. Mention the relevant source id in "reason". Only report real problems; don't nitpick style.
+Footnote markers look like [^id]; ids belong to the sources below. Citations must lead readers to published, external sources: only sources with a URL may be cited, never those marked "not citable" (internal research notes). For "missing citation" and "wrong citation", the replacement is the original text with the right marker of a citable source; if only a non-citable note supports the claim, report it as "unsupported" instead. Don't report problems with footnote definitions; those are checked separately. For "misquote", it is the original with the source's exact wording. For "unsupported" and "contradicted", give a corrected wording only if a source supports one; otherwise null. Mention the relevant source id in "reason". Only report real problems; don't nitpick style.
 
 ${SUGGESTION_FORMAT}
 
@@ -144,6 +146,17 @@ export interface RawSuggestion {
   replacement: string | null;
   reason: string;
   kind: string;
+  /** A footnote definition to add at the end of the document when applying (if it has none for that id). */
+  definition?: string;
+  /** Applicable once the author supplies a published URL. */
+  withUrl?: (url: string) => UrlFix;
+}
+
+export interface UrlFix {
+  replacement: string;
+  definition?: string;
+  /** Research note whose front matter should record the URL. */
+  note?: string;
 }
 
 /** Parses the model's JSON reply, tolerating code fences and surrounding chatter. */

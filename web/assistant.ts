@@ -18,7 +18,8 @@ import {
 const PART_CONCURRENCY = 3;
 import { runChat, type AiRun } from "./ai-client.ts";
 import { bridge } from "./bridge.ts";
-import { insertBlock } from "./editor.ts";
+import { citationProblems, citesUnpublished, isExternalUrl, withFrontmatterUrl } from "./citations.ts";
+import { insertBlock, withFootnoteDefinition } from "./editor.ts";
 import { renderMarkdown } from "./markdown.ts";
 import {
   addSuggestionRanges,
@@ -46,6 +47,10 @@ interface Suggestion {
   replacement: string | null;
   reason: string;
   kind: string;
+  /** Footnote definition to add along with the replacement. */
+  definition?: string;
+  /** Builds the fix from a published URL the author enters. */
+  withUrl?: RawSuggestion["withUrl"];
   /** The document text the suggestion was anchored to. */
   anchored: string | null;
   status: "pending" | "applied" | "dismissed" | "stale";
@@ -239,14 +244,23 @@ export class Assistant {
     const project = this.#host.project();
     if (!project) return Promise.resolve();
     const { path, text } = this.#doc();
-    return this.#review(`Checking ${path} against sources`, [sourceCheckMessages(project, path, text)], null);
+    return this.#review(`Checking ${path} against sources`, [sourceCheckMessages(project, path, text)], null, {
+      local: citationProblems(project, text),
+      keep: (suggestion) => !citesUnpublished(project, suggestion),
+    });
   }
 
   /**
    * Runs prompts that return suggestions (a few at a time) and anchors the results
    * in the editor as each one finishes. `scope` limits where the text is looked up.
+   * `local` are problems found without the model; `keep` filters the model's suggestions.
    */
-  async #review(title: string, requests: ChatMessage[][], scope: { from: number; to: number } | null): Promise<void> {
+  async #review(
+    title: string,
+    requests: ChatMessage[][],
+    scope: { from: number; to: number } | null,
+    { local = [], keep = () => true }: { local?: RawSuggestion[]; keep?: (suggestion: RawSuggestion) => boolean } = {},
+  ): Promise<void> {
     if (!this.#ready()) return;
     const group = this.#group(title);
     const runs = new Set<AiRun>();
@@ -262,7 +276,7 @@ export class Assistant {
 
     let next = 0;
     let finished = 0;
-    let found = 0;
+    let found = local.length ? this.#anchor(group, local, scope) : 0;
     let latest = "Waiting for the model…";
     const errors: string[] = [];
     const update = () => {
@@ -279,7 +293,7 @@ export class Assistant {
         }, 0.2);
         runs.add(run);
         try {
-          found += this.#anchor(group, parseSuggestions(await run.done), scope);
+          found += this.#anchor(group, parseSuggestions(await run.done).filter(keep), scope);
         } catch (error) {
           if (!cancelled) errors.push((error as Error).message);
         } finally {
@@ -291,7 +305,7 @@ export class Assistant {
     };
     await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, requests.length) }, worker));
 
-    if (errors.length === requests.length) {
+    if (errors.length === requests.length && !local.length) {
       group.replaceWith(this.#error(new Error(errors[0])));
     } else {
       const summary = cancelled
@@ -337,13 +351,15 @@ export class Assistant {
       if (/^https?:/i.test(link.href)) void bridge.invoke("shell.openExternal", { url: link.href });
       return;
     }
+    if (target.closest("input")) return;
     const button = target.closest<HTMLButtonElement>("button[data-action]");
     const item = target.closest<HTMLElement>(".suggestion");
     const suggestion = item ? this.#suggestions.get(item.dataset.id!) : undefined;
 
     switch (button?.dataset.action) {
       case "apply":
-        if (suggestion) this.#apply(suggestion);
+        if (suggestion?.replacement === null && suggestion.withUrl) void this.#applyWithUrl(suggestion);
+        else if (suggestion) this.#apply(suggestion);
         return;
       case "dismiss":
         if (suggestion) this.#dismiss(suggestion);
@@ -355,6 +371,7 @@ export class Assistant {
           if (each.status !== "pending") continue;
           if (button.dataset.action === "dismiss-all") this.#dismiss(each);
           else if (each.replacement !== null) this.#apply(each);
+          else if (each.withUrl && this.#enteredUrl(each)) void this.#applyWithUrl(each);
         }
         return;
       case "insert-reply": {
@@ -379,17 +396,53 @@ export class Assistant {
 
   #apply(suggestion: Suggestion): void {
     const { editor } = this.#host;
-    const range = suggestionRange(editor.state, suggestion.id);
-    if (!range || suggestion.replacement === null || editor.state.sliceDoc(range.from, range.to) !== suggestion.anchored) {
-      this.#setStatus(suggestion, "stale", "The text changed since this was suggested.");
-      return;
-    }
+    const range = this.#currentRange(suggestion);
+    if (!range || suggestion.replacement === null) return;
+    const change = { from: range.from, to: range.to, insert: suggestion.replacement };
     editor.dispatch({
-      changes: { from: range.from, to: range.to, insert: suggestion.replacement },
+      changes: suggestion.definition ? withFootnoteDefinition(editor.state.doc, change, suggestion.definition) : change,
       userEvent: "input.suggestion",
     });
     removeSuggestionRange(editor, suggestion.id);
     this.#setStatus(suggestion, "applied");
+  }
+
+  /** Where the suggestion is now, or null (marking it stale) if its text changed. */
+  #currentRange(suggestion: Suggestion): { from: number; to: number } | null {
+    const { state } = this.#host.editor;
+    const range = suggestionRange(state, suggestion.id);
+    if (range && state.sliceDoc(range.from, range.to) === suggestion.anchored) return range;
+    this.#setStatus(suggestion, "stale", "The text changed since this was suggested.");
+    return null;
+  }
+
+  #enteredUrl(suggestion: Suggestion): string | null {
+    const url = suggestion.element.querySelector<HTMLInputElement>(".suggestion-url")?.value.trim() ?? "";
+    return isExternalUrl(url) ? url : null;
+  }
+
+  /** Fixes a citation with the URL the author entered, recording it in the research note too. */
+  async #applyWithUrl(suggestion: Suggestion): Promise<void> {
+    const url = this.#enteredUrl(suggestion);
+    if (!url) {
+      suggestion.element.querySelector<HTMLInputElement>(".suggestion-url")?.focus();
+      this.#host.flash("Enter the published URL (https://…)");
+      return;
+    }
+    if (!this.#currentRange(suggestion)) return;
+    const fix = suggestion.withUrl!(url);
+    if (fix.note) {
+      try {
+        const markdown = await bridge.invoke<string | null>("file.read", { path: fix.note });
+        if (markdown !== null) await bridge.invoke("file.write", { path: fix.note, content: withFrontmatterUrl(markdown, url) });
+      } catch (error) {
+        this.#host.flash(`Couldn't update ${fix.note}: ${(error as Error).message}`);
+        return;
+      }
+    }
+    suggestion.replacement = fix.replacement;
+    suggestion.definition = fix.definition;
+    this.#apply(suggestion);
   }
 
   #dismiss(suggestion: Suggestion): void {
@@ -405,7 +458,7 @@ export class Assistant {
     $(suggestion.element, ".suggestion-state").textContent = label;
   }
 
-  #suggestion(group: HTMLElement, data: Pick<Suggestion, "original" | "replacement" | "reason" | "kind">): Suggestion {
+  #suggestion(group: HTMLElement, data: RawSuggestion): Suggestion {
     const id = crypto.randomUUID();
     const element = h(
       "div",
@@ -417,6 +470,7 @@ export class Assistant {
         "div",
         { class: "suggestion-actions" },
         h("span", { class: "suggestion-state" }),
+        ...(data.withUrl ? [h("input", { class: "suggestion-url", type: "url", placeholder: "https://…", "aria-label": "Published URL" })] : []),
         h("button", { "data-action": "apply", class: "primary" }, "Apply"),
         h("button", { "data-action": "dismiss" }, "Dismiss"),
       ),
@@ -424,6 +478,11 @@ export class Assistant {
     $(group, ".suggestion-list").append(element);
     const suggestion: Suggestion = { id, ...data, anchored: null, status: "pending", element };
     this.#suggestions.set(id, suggestion);
+    suggestion.element.querySelector(".suggestion-url")?.addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key !== "Enter") return;
+      event.preventDefault();
+      void this.#applyWithUrl(suggestion);
+    });
     this.#renderSuggestion(suggestion);
     return suggestion;
   }
@@ -447,8 +506,9 @@ export class Assistant {
         );
       }
     }
+    if (suggestion.definition) diff.append(h("ins", { class: "block" }, suggestion.definition));
     $(suggestion.element, ".suggestion-reason").textContent = suggestion.reason;
-    $<HTMLButtonElement>(suggestion.element, "[data-action=apply]").hidden = suggestion.replacement === null;
+    $<HTMLButtonElement>(suggestion.element, "[data-action=apply]").hidden = suggestion.replacement === null && !suggestion.withUrl;
   }
 
   #group(title: string): HTMLElement {
